@@ -8,6 +8,7 @@ from app.agents.destination_agent import DestinationAgent
 from app.agents.planner_agent import PlannerAgent
 from app.agents.transport_agent import TransportAgent
 from app.models.trip import TripRequest
+from app.workflows.trip_workflow import run_trip_workflow
 
 router = APIRouter(prefix="/api/trips", tags=["trips"])
 planner_agent = PlannerAgent()
@@ -159,4 +160,48 @@ def get_trip_budget(payload: ParseTripRequest):
         "duration_days": duration_days,
         "duration_nights": duration_nights,
         "budget": budget_results.model_dump(mode="json"),
+    }
+
+
+@router.post("/plan")
+def generate_full_trip_plan(payload: ParseTripRequest):
+    if payload.message is not None:
+        input_data = payload.message
+    elif payload.trip is not None:
+        input_data = payload.trip
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Either 'message' or 'trip' must be provided in request body.",
+        )
+
+    final_state = run_trip_workflow(input_data)
+
+    if final_state.get("status") == "error":
+        raise HTTPException(
+            status_code=400, detail=final_state.get("error", "Workflow error.")
+        )
+
+    if final_state.get("status") == "needs_information":
+        return {
+            "status": "needs_information",
+            "missing": final_state.get("missing", []),
+        }
+
+    return {
+        "status": "success",
+        "trip": final_state["trip_request"].model_dump(mode="json"),
+        "duration_days": final_state["duration_days"],
+        "duration_nights": final_state["duration_nights"],
+        "transport": final_state["transport_results"].model_dump(
+            mode="json", by_alias=True
+        ),
+        "accommodation": final_state["accommodation_results"].model_dump(
+            mode="json"
+        ),
+        "destination": final_state["destination_results"].model_dump(
+            mode="json"
+        ),
+        "budget": final_state["budget_result"].model_dump(mode="json"),
+        "itinerary": final_state["itinerary_result"].model_dump(mode="json"),
     }
