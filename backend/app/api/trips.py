@@ -8,6 +8,12 @@ from app.agents.destination_agent import DestinationAgent
 from app.agents.planner_agent import PlannerAgent
 from app.agents.transport_agent import TransportAgent
 from app.models.trip import TripRequest
+from app.services.llm.provider import (
+    LLMConfigurationError,
+    LLMExecutionError,
+    LLMProvider,
+)
+from app.services.trip_modifier import TripModifier
 from app.workflows.trip_workflow import run_trip_workflow
 
 router = APIRouter(prefix="/api/trips", tags=["trips"])
@@ -21,6 +27,11 @@ budget_agent = BudgetAgent()
 class ParseTripRequest(BaseModel):
     message: Optional[str] = None
     trip: Optional[Dict[str, Any]] = None
+
+
+class ModifyTripRequest(BaseModel):
+    message: str
+    trip: Dict[str, Any]
 
 
 @router.post("/parse")
@@ -205,3 +216,41 @@ def generate_full_trip_plan(payload: ParseTripRequest):
         "budget": final_state["budget_result"].model_dump(mode="json"),
         "itinerary": final_state["itinerary_result"].model_dump(mode="json"),
     }
+
+
+@router.post("/modify")
+def modify_trip_endpoint(payload: ModifyTripRequest):
+    if not payload.message or not payload.message.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Modification message must not be empty.",
+        )
+    if not payload.trip:
+        raise HTTPException(
+            status_code=400,
+            detail="Current trip data must be provided.",
+        )
+
+    llm_provider = LLMProvider()
+    if not llm_provider.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Conversational trip modification requires an LLM provider configuration. Please set LLM_API_KEY in environment variables.",
+        )
+
+    try:
+        intent = llm_provider.interpret_modification(
+            payload.message, current_trip=payload.trip
+        )
+    except LLMConfigurationError as err:
+        raise HTTPException(status_code=503, detail=str(err))
+    except LLMExecutionError as err:
+        raise HTTPException(status_code=502, detail=str(err))
+
+    modifier = TripModifier()
+    result = modifier.modify_trip(payload.trip, intent)
+
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result.get("error"))
+
+    return result

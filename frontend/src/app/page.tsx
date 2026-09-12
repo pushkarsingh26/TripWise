@@ -114,7 +114,7 @@ interface ItineraryResultData {
 }
 
 interface FullPlanResponse {
-  status: "success" | "needs_information" | "error";
+  status: "success" | "needs_information" | "needs_clarification" | "error";
   trip?: TripData;
   duration_days?: number;
   duration_nights?: number;
@@ -138,6 +138,8 @@ interface FullPlanResponse {
   itinerary?: ItineraryResultData;
   missing?: string[];
   error?: string;
+  intent?: Record<string, any>;
+  message?: string;
 }
 
 export default function Home() {
@@ -145,8 +147,15 @@ export default function Home() {
   const [message, setMessage] = useState<string>(
     "I want to travel from Indore to Goa from October 10 to October 15 with a budget of 30000 for 2 people. I love beaches and food."
   );
+  const [modificationMsg, setModificationMsg] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
+  const [modifying, setModifying] = useState<boolean>(false);
   const [planResult, setPlanResult] = useState<FullPlanResponse | null>(null);
+  const [modificationFeedback, setModificationFeedback] = useState<{
+    type: "success" | "warning" | "error";
+    message: string;
+    intent?: Record<string, any>;
+  } | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -171,6 +180,7 @@ export default function Home() {
     setLoading(true);
     setPlanResult(null);
     setApiError(null);
+    setModificationFeedback(null);
 
     try {
       const res = await fetch(`${apiUrl}/api/trips/plan`, {
@@ -189,6 +199,67 @@ export default function Home() {
       setApiError("Unable to connect to backend service.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleModifyTrip = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!planResult || !planResult.trip || !modificationMsg.trim()) return;
+
+    setModifying(true);
+    setModificationFeedback(null);
+
+    try {
+      const res = await fetch(`${apiUrl}/api/trips/modify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: modificationMsg,
+          trip: planResult.trip,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setModificationFeedback({
+          type: "error",
+          message: data.detail || "Failed to modify trip plan.",
+        });
+      } else if (data.status === "needs_clarification") {
+        setModificationFeedback({
+          type: "warning",
+          message: data.message || "Request is ambiguous. Please clarify your modification.",
+          intent: data.intent,
+        });
+      } else if (data.status === "success") {
+        setModificationFeedback({
+          type: "success",
+          message: data.message || "Trip plan updated successfully!",
+          intent: data.intent,
+        });
+        if (data.plan && data.trip) {
+          setPlanResult({
+            status: "success",
+            trip: data.trip,
+            duration_days: data.plan.duration_days,
+            duration_nights: data.plan.duration_nights,
+            transport: data.plan.transport,
+            accommodation: data.plan.accommodation,
+            destination: data.plan.destination,
+            budget: data.plan.budget,
+            itinerary: data.plan.itinerary,
+          });
+        }
+        setModificationMsg("");
+      }
+    } catch {
+      setModificationFeedback({
+        type: "error",
+        message: "Unable to communicate with modification service.",
+      });
+    } finally {
+      setModifying(false);
     }
   };
 
@@ -237,7 +308,7 @@ export default function Home() {
           <h1 className="text-3xl font-bold tracking-tight">Tripwise</h1>
           <p className="text-gray-700 text-lg">AI-powered travel planning</p>
           <p className="text-sm text-gray-500">
-            Phase 6 — Itinerary Agent + Multi-Agent Orchestration
+            Phase 7 — Conversational Trip Modification + LLM Integration
           </p>
         </div>
 
@@ -319,6 +390,49 @@ export default function Home() {
                   </span>
                 </div>
               </div>
+            </div>
+
+            {/* Conversational Trip Modification Form */}
+            <div className="p-4 border border-blue-200 bg-blue-50/40 rounded space-y-3">
+              <h3 className="font-semibold text-base text-blue-900">
+                Modify Current Trip Plan
+              </h3>
+              <form onSubmit={handleModifyTrip} className="space-y-3">
+                <input
+                  type="text"
+                  className="w-full p-2.5 border border-gray-300 rounded text-sm text-black bg-white focus:outline-none focus:ring-1 focus:ring-black"
+                  placeholder="e.g. 'Make this trip cheaper', 'Increase budget to ₹40,000', 'Make it 4 days', 'Add more adventure'"
+                  value={modificationMsg}
+                  onChange={(e) => setModificationMsg(e.target.value)}
+                  disabled={modifying}
+                />
+                <button
+                  type="submit"
+                  disabled={modifying || !modificationMsg.trim()}
+                  className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {modifying ? "Interpreting & Updating..." : "Update Trip"}
+                </button>
+              </form>
+
+              {modificationFeedback && (
+                <div
+                  className={`p-3 text-xs rounded border ${
+                    modificationFeedback.type === "error"
+                      ? "bg-red-50 border-red-200 text-red-800"
+                      : modificationFeedback.type === "warning"
+                      ? "bg-amber-50 border-amber-200 text-amber-800"
+                      : "bg-green-50 border-green-200 text-green-800"
+                  }`}
+                >
+                  <p className="font-semibold">{modificationFeedback.message}</p>
+                  {modificationFeedback.intent && (
+                    <div className="mt-1 font-mono text-[11px] bg-white/70 p-1.5 rounded">
+                      Action: {modificationFeedback.intent.action}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Day-by-Day Itinerary */}

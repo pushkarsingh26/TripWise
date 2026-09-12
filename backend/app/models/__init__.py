@@ -9,6 +9,7 @@ from app.models.itinerary import (
     ItineraryDay,
     ItineraryResult,
 )
+from app.models.modification import ModificationAction, ModificationIntent
 from app.models.transport import TransportOption, TransportResults
 from app.models.trip import TripPlanningState, TripRequest
 
@@ -27,4 +28,6 @@ __all__ = [
     "ItineraryActivity",
     "ItineraryDay",
     "ItineraryResult",
+    "ModificationAction",
+    "ModificationIntent",
 ]
