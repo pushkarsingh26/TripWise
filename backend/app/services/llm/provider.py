@@ -1,15 +1,25 @@
 import json
 import os
 import re
+import time
 from typing import Any, Dict, Optional
-import httpx
 
-from app.models.modification import ModificationAction, ModificationIntent
+from app.config import (
+    get_config_diagnostics,
+    get_provider_details,
+    is_provider_configured,
+    validate_provider_name,
+)
+from app.models.modification import ModificationIntent
 from app.services.llm.base import BaseLLMProvider
+from app.services.llm.providers.gemini import call_gemini_api
+from app.services.llm.providers.groq import call_groq_api
+from app.services.llm.providers.nvidia import call_nvidia_api
+from app.services.llm.providers.openrouter import call_openrouter_api
 
 
 class LLMConfigurationError(Exception):
-    """Raised when LLM provider is not configured or API key is missing."""
+    """Raised when LLM provider is invalid, unconfigured, or missing API keys."""
     pass
 
 
@@ -58,8 +68,9 @@ OUTPUT FORMAT (JSON ONLY):
 
 class LLMProvider(BaseLLMProvider):
     """
-    Provider-agnostic LLM client supporting Gemini, Groq, and OpenAI compatible free endpoints.
-    Fail-safe when unconfigured, strict JSON parsing with Pydantic validation.
+    Multi-provider LLM client supporting Groq, NVIDIA NIM/Build, Google Gemini, and OpenRouter.
+    Includes active provider selection, optional fallback provider routing, configurable retries,
+    timeout handling, and strict JSON output validation.
     """
 
     def __init__(
@@ -69,23 +80,30 @@ class LLMProvider(BaseLLMProvider):
         model: Optional[str] = None,
         allow_rule_fallback: bool = False,
     ):
-        self.provider = (provider or os.getenv("LLM_PROVIDER", "gemini")).lower()
-        self.api_key = api_key or os.getenv("LLM_API_KEY", "")
-        self.model = model or os.getenv("LLM_MODEL", "gemini-1.5-flash")
+        raw_provider = provider or os.getenv("LLM_PROVIDER", "gemini")
+        self.provider_name = raw_provider.lower().strip()
+        self.api_key_override = api_key
+        self.model_override = model
         self.allow_rule_fallback = allow_rule_fallback
 
+        if not validate_provider_name(self.provider_name) and not self.allow_rule_fallback:
+            raise LLMConfigurationError(
+                f"Unsupported LLM_PROVIDER '{raw_provider}'. "
+                "Allowed providers: 'groq', 'nvidia', 'gemini', 'openrouter'."
+            )
+
     def is_configured(self) -> bool:
-        """Returns True if API key and provider are set, or if rule fallback is enabled."""
-        return bool(self.api_key and self.api_key.strip()) or self.allow_rule_fallback
+        """Returns True if current active provider has an API key configured or rule fallback is enabled."""
+        if self.api_key_override is not None:
+            return bool(self.api_key_override and self.api_key_override.strip()) or self.allow_rule_fallback
+        return is_provider_configured(self.provider_name) or self.allow_rule_fallback
 
     def interpret_modification(
         self,
         message: str,
         current_trip: Optional[Dict[str, Any]] = None,
     ) -> ModificationIntent:
-        """
-        Interprets user natural-language modification request.
-        """
+        """Interprets user modification request into structured ModificationIntent."""
         if not message or not message.strip():
             return ModificationIntent(
                 action="ambiguous_request",
@@ -95,95 +113,95 @@ class LLMProvider(BaseLLMProvider):
 
         if not self.is_configured():
             raise LLMConfigurationError(
-                "Conversational trip modification requires an LLM provider configuration. "
-                "Please set LLM_API_KEY in environment variables."
+                f"Conversational trip modification requires an LLM provider configuration for '{self.provider_name}'. "
+                "Please set the corresponding API key in environment variables."
             )
 
-        # If rule fallback enabled and no API key present, use rule-based intent parser
-        if self.allow_rule_fallback and not (self.api_key and self.api_key.strip()):
+        # Rule-based fallback for offline test execution when no key is present
+        if self.allow_rule_fallback and (
+            (self.api_key_override is not None and not self.api_key_override.strip())
+            or not is_provider_configured(self.provider_name)
+        ):
             return self._parse_rule_based(message, current_trip)
 
         try:
-            raw_response = self._call_llm_api(message, current_trip)
+            raw_response = self._execute_with_retry_and_fallback(message, current_trip)
             intent = self._parse_and_validate_json(raw_response)
             return intent
-        except LLMExecutionError:
+        except (LLMConfigurationError, LLMExecutionError):
             raise
         except Exception as e:
             if self.allow_rule_fallback:
                 return self._parse_rule_based(message, current_trip)
             raise LLMExecutionError(f"Failed to interpret modification: {str(e)}")
 
-    def _call_llm_api(self, message: str, current_trip: Optional[Dict[str, Any]] = None) -> str:
-        """Invokes external LLM HTTP REST endpoint."""
-        prompt = f"{SYSTEM_PROMPT}\n\nUser Current Trip: {json.dumps(current_trip or {})}\nUser Modification Request: \"{message}\"\nJSON Intent:"
+    def _execute_with_retry_and_fallback(
+        self, message: str, current_trip: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Executes LLM API call with retries on primary provider, then attempts fallback provider if configured."""
+        user_prompt = f"User Current Trip: {json.dumps(current_trip or {})}\nUser Modification Request: \"{message}\"\nJSON Intent:"
 
-        if self.provider == "gemini":
-            return self._call_gemini_api(prompt)
-        elif self.provider in ("groq", "openai"):
-            return self._call_openai_compatible_api(prompt)
-        else:
-            # Fallback to OpenAI compatible format for generic providers
-            return self._call_openai_compatible_api(prompt)
+        # Attempt Primary Provider
+        primary_details = get_provider_details(self.provider_name)
+        if self.api_key_override is not None:
+            primary_details["api_key"] = self.api_key_override
+        if self.model_override is not None:
+            primary_details["model"] = self.model_override
 
-    def _call_gemini_api(self, prompt: str) -> str:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "response_mime_type": "application/json",
-                "temperature": 0.1,
-            },
-        }
+        try:
+            return self._dispatch_provider_call(primary_details, user_prompt)
+        except LLMConfigurationError:
+            raise
+        except Exception as primary_err:
+            # Check if fallback provider is configured
+            fallback_name = (os.getenv("LLM_FALLBACK_PROVIDER") or "").lower().strip()
+            if fallback_name and validate_provider_name(fallback_name) and is_provider_configured(fallback_name):
+                fallback_details = get_provider_details(fallback_name)
+                try:
+                    return self._dispatch_provider_call(fallback_details, user_prompt)
+                except Exception as fallback_err:
+                    raise LLMExecutionError(
+                        f"Primary provider '{self.provider_name}' failed ({primary_err}) and "
+                        f"fallback provider '{fallback_name}' also failed ({fallback_err})."
+                    ) from fallback_err
 
-        with httpx.Client(timeout=15.0) as client:
-            resp = client.post(url, json=payload)
-            if resp.status_code != 200:
-                raise LLMExecutionError(f"Gemini API error ({resp.status_code}): {resp.text}")
-            data = resp.json()
+            raise LLMExecutionError(f"Provider '{self.provider_name}' call failed: {str(primary_err)}") from primary_err
+
+    def _dispatch_provider_call(self, details: Dict[str, Any], user_prompt: str) -> str:
+        """Dispatches call to specific provider function with exponential backoff retries."""
+        p_name = details["provider"]
+        api_key = details["api_key"]
+        model = details["model"]
+        base_url = details["base_url"]
+        timeout = details["timeout_seconds"]
+        max_retries = details["max_retries"]
+
+        if not api_key:
+            raise LLMConfigurationError(f"API key for provider '{p_name}' is missing or empty.")
+
+        last_exception = None
+        for attempt in range(max_retries + 1):
             try:
-                text = data["candidates"][0]["content"]["parts"][0]["text"]
-                return text
-            except (KeyError, IndexError) as err:
-                raise LLMExecutionError(f"Malformed Gemini API response: {data}") from err
+                if p_name == "gemini":
+                    return call_gemini_api(user_prompt, api_key, model, timeout_seconds=timeout)
+                elif p_name == "groq":
+                    return call_groq_api(user_prompt, SYSTEM_PROMPT, api_key, model, base_url=base_url, timeout_seconds=timeout)
+                elif p_name == "nvidia":
+                    return call_nvidia_api(user_prompt, SYSTEM_PROMPT, api_key, model, base_url=base_url, timeout_seconds=timeout)
+                elif p_name == "openrouter":
+                    return call_openrouter_api(user_prompt, SYSTEM_PROMPT, api_key, model, base_url=base_url, timeout_seconds=timeout)
+                else:
+                    raise ValueError(f"Unknown provider '{p_name}'")
+            except Exception as err:
+                last_exception = err
+                if attempt < max_retries:
+                    time.sleep(0.5 * (2 ** attempt))
 
-    def _call_openai_compatible_api(self, prompt: str) -> str:
-        if self.provider == "groq":
-            endpoint = "https://api.groq.com/openai/v1/chat/completions"
-            model_name = self.model or "llama-3.3-70b-versatile"
-        else:
-            endpoint = os.getenv("LLM_ENDPOINT", "https://api.openai.com/v1/chat/completions")
-            model_name = self.model or "gpt-4o-mini"
-
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "response_format": {"type": "json_object"},
-            "temperature": 0.1,
-        }
-
-        with httpx.Client(timeout=15.0) as client:
-            resp = client.post(endpoint, headers=headers, json=payload)
-            if resp.status_code != 200:
-                raise LLMExecutionError(f"LLM Provider API error ({resp.status_code}): {resp.text}")
-            data = resp.json()
-            try:
-                text = data["choices"][0]["message"]["content"]
-                return text
-            except (KeyError, IndexError) as err:
-                raise LLMExecutionError(f"Malformed LLM API response: {data}") from err
+        raise last_exception or RuntimeError(f"Failed provider call to {p_name}")
 
     def _parse_and_validate_json(self, raw_text: str) -> ModificationIntent:
         """Parses raw text into JSON and validates against ModificationIntent Pydantic model."""
         cleaned = raw_text.strip()
-        # Remove potential markdown code blocks
         if cleaned.startswith("```"):
             cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
             cleaned = re.sub(r"\n?```$", "", cleaned)
@@ -204,13 +222,9 @@ class LLMProvider(BaseLLMProvider):
         message: str,
         current_trip: Optional[Dict[str, Any]] = None,
     ) -> ModificationIntent:
-        """
-        Rule-based parser for fallback/testing when API key is missing or testing offline.
-        Supports English and Hinglish patterns.
-        """
+        """Rule-based parser for fallback/testing when API key is missing or testing offline."""
         text = message.lower().strip()
 
-        # Check ambiguous requests first
         if text in ["change hotel", "change transport", "change accommodation", "badlo"]:
             return ModificationIntent(
                 action="ambiguous_request",
@@ -218,7 +232,6 @@ class LLMProvider(BaseLLMProvider):
                 clarification_message=f"Could you please specify details for '{message}'?",
             )
 
-        # Budget extraction (e.g. "budget to 40000", "40,000", "budget 30000 kar do")
         budget_match = re.search(r'(?:budget|₹|rs\.?)\s*(?:to|is|be|=|kar do)?\s*₹?\s*([\d,]+)', text)
         if not budget_match:
             budget_match = re.search(r'([\d,]+)\s*(?:budget|rupees|rs|inr)', text)
@@ -228,27 +241,19 @@ class LLMProvider(BaseLLMProvider):
             try:
                 num = float(val_str)
                 if num > 0:
-                    return ModificationIntent(
-                        action="change_budget",
-                        new_budget=num,
-                    )
+                    return ModificationIntent(action="change_budget", new_budget=num)
             except ValueError:
                 pass
 
-        # Duration extraction (e.g. "4 day trip", "make it 5 days", "3 din ki kar do")
         duration_match = re.search(r'(\d+)\s*(?:day|days|din)', text)
         if duration_match:
             try:
                 days = int(duration_match.group(1))
                 if days > 0:
-                    return ModificationIntent(
-                        action="change_duration",
-                        new_duration_days=days,
-                    )
+                    return ModificationIntent(action="change_duration", new_duration_days=days)
             except ValueError:
                 pass
 
-        # Destination change (e.g. "change destination to Jaipur", "go to Goa instead")
         dest_match = re.search(r'(?:destination|place|go|trip)\s*(?:to|instead|badal ke)?\s*([a-zA-Z\s]+)', text)
         if "jaipur" in text:
             return ModificationIntent(action="change_destination", new_destination="Jaipur")
@@ -261,23 +266,19 @@ class LLMProvider(BaseLLMProvider):
             if dest_name and dest_name not in ["To", "Cheaper", "More"]:
                 return ModificationIntent(action="change_destination", new_destination=dest_name)
 
-        # Cheaper / Optimize budget (e.g. "make this trip cheaper", "remove expensive activities", "budget thoda kam karo")
         if any(kw in text for kw in ["cheaper", "sasta", "kam karo", "optimize budget", "less expensive"]):
             return ModificationIntent(action="optimize_budget")
 
-        # Transport preference
         if "flight" in text or "air" in text:
             return ModificationIntent(action="change_transport_preference", requested_transport_preference="flight")
         elif "train" in text:
             return ModificationIntent(action="change_transport_preference", requested_transport_preference="train")
 
-        # Accommodation preference
         if "luxury" in text or "5 star" in text or "resort" in text:
             return ModificationIntent(action="change_accommodation_preference", requested_accommodation_preference="luxury")
         elif "hostel" in text or "budget hotel" in text:
             return ModificationIntent(action="change_accommodation_preference", requested_accommodation_preference="budget")
 
-        # Remove activity
         if "remove expensive" in text or "mehenga hata do" in text:
             return ModificationIntent(action="remove_activity", remove_activity_names=["expensive_activities"])
         elif "remove" in text or "hata do" in text:
@@ -285,9 +286,7 @@ class LLMProvider(BaseLLMProvider):
             act_name = rem_match.group(1).strip() if rem_match else "activity"
             return ModificationIntent(action="remove_activity", remove_activity_names=[act_name])
 
-        # Preferences (adventure, food, sightseeing, beach, culture)
-        adds = []
-        removes = []
+        adds, removes = [], []
         if "adventure" in text:
             adds.append("adventure")
         if "food" in text:
@@ -309,7 +308,6 @@ class LLMProvider(BaseLLMProvider):
                 remove_preferences=removes,
             )
 
-        # Default fallback
         return ModificationIntent(
             action="ambiguous_request",
             confirmation_required=True,

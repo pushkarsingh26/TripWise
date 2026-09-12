@@ -137,6 +137,25 @@ tripwise/
 
 ---
 
+## Free LLM Providers
+
+Tripwise supports multiple free-tier LLM providers for conversational trip modification (Phase 7):
+
+- **Groq** (`LLM_PROVIDER=groq`)
+- **NVIDIA NIM / Build** (`LLM_PROVIDER=nvidia`)
+- **Google Gemini** (`LLM_PROVIDER=gemini`)
+- **OpenRouter** (`LLM_PROVIDER=openrouter`)
+
+### Configuration & Key Security
+- Only one provider is active at a time, controlled via `LLM_PROVIDER` in `backend/.env`.
+- API keys are managed locally in `backend/.env` and must **never** be committed to Git. `backend/.env.example` contains placeholders.
+- An optional fallback provider can be enabled via `LLM_FALLBACK_PROVIDER`.
+- Execution timeouts (`LLM_TIMEOUT_SECONDS`) and retries (`LLM_MAX_RETRIES`) are fully configurable.
+- Core Phase 1–6 functionality works 100% deterministically without any LLM API key configured.
+
+---
+
 ## License
 
 [MIT License](LICENSE)
+

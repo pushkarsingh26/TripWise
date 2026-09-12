@@ -130,8 +130,12 @@ def test_trip_modifier_ambiguous_request(base_trip_dict):
 
 
 def test_api_modify_endpoint_unconfigured(monkeypatch, base_trip_dict):
-    # Ensure LLM_API_KEY is empty
+    # Ensure all provider API keys are empty
     monkeypatch.setenv("LLM_API_KEY", "")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("GROQ_API_KEY", "")
+    monkeypatch.setenv("NVIDIA_API_KEY", "")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
     client = TestClient(app)
 
     resp = client.post(
@@ -143,6 +147,7 @@ def test_api_modify_endpoint_unconfigured(monkeypatch, base_trip_dict):
     )
     assert resp.status_code == 503
     assert "requires an LLM provider configuration" in resp.json()["detail"]
+
 
 
 def test_api_modify_endpoint_rule_fallback(monkeypatch, base_trip_dict):
