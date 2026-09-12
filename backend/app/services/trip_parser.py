@@ -140,9 +140,9 @@ class TripParser:
         return None
 
     def _extract_budget(self, text: str) -> Optional[float]:
-        # Matches: budget 30000, budget 30k, budget of ₹30,000, 30k budget, 30000 rs, ₹30000
+        # Matches: budget 30000, budget 30k, budget of ₹30,000, 30k budget, 30000 rs, ₹30000, बजट 30000
         budget_match = re.search(
-            r"\b(?:budget|cost|price|rupees|rs|\₹)\s*(?:of|is|:)?\s*(?:rs|\₹)?\s*(\d+(?:\.\d+)?\s*[kK]?|\d{1,3}(?:,\d{3})+)\b",
+            r"(?:budget|cost|price|rupees|rs|\₹|बजट)\s*(?:of|is|:|hai|है|=)?\s*(?:rs|\₹)?\s*(\d+(?:\.\d+)?\s*[kK]?|\d{1,3}(?:,\d{3})+)",
             text,
             re.IGNORECASE,
         )
@@ -169,8 +169,7 @@ class TripParser:
         self, text: str
     ) -> Tuple[Optional[str], Optional[str]]:
         patterns = [
-            r"\bfrom\s+([A-Za-z]+)\s+(?:to|se)\s+([A-Za-z]+)\b",
-            r"\b([A-Za-z]+)\s+(?:to|se)\s+([A-Za-z]+)\b",
+            r"(?:from\s+|^|\s+)([A-Za-z\u0900-\u097F]+)\s+(?:to|se|से)\s+([A-Za-z\u0900-\u097F]+)(?=\s+|$|,|\.)",
         ]
 
         for pat in patterns:
@@ -197,6 +196,10 @@ class TripParser:
         return None, None
 
     def _clean_city_name(self, city: str) -> str:
+        if re.search(r"[\u0900-\u097F]", city):
+            # Preserve exact Devanagari script characters
+            return city.strip()
+
         city = re.sub(
             r"\b(?:mujhe|want|to|travel|trip|go|jana|hai|se|from|tak)\b",
             "",

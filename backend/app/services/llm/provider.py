@@ -10,7 +10,8 @@ from app.config import (
     is_provider_configured,
     validate_provider_name,
 )
-from app.models.modification import ModificationIntent
+from app.models.language import ResponseLanguage
+from app.models.modification import ModificationAction, ModificationIntent
 from app.services.llm.base import BaseLLMProvider
 from app.services.llm.providers.gemini import call_gemini_api
 from app.services.llm.providers.groq import call_groq_api
@@ -28,14 +29,19 @@ class LLMExecutionError(Exception):
     pass
 
 
-SYSTEM_PROMPT = """You are a natural language intent parser for a travel planning system named Tripwise.
-Your ONLY task is to parse the user's trip modification request and extract structured modification intent into strict JSON format matching the schema below.
+SYSTEM_PROMPT = """You are a natural language intent and language parser for a travel planning system named Tripwise.
+Your ONLY task is to parse the user's trip modification request, detect the request language, and extract structured modification intent into strict JSON format matching the schema below.
 
 CRITICAL INSTRUCTIONS:
 1. You MUST return ONLY valid JSON with no extra commentary, preambles, code fences, markdown, or explanations.
 2. DO NOT calculate costs, prices, or budgets.
 3. DO NOT generate an itinerary or invent places.
-4. If the request is ambiguous (e.g., "change hotel" without specifying budget or style, or vague modification), set "action": "ambiguous_request", "confirmation_required": true, and provide a clear question in "clarification_message".
+4. Detect the language/style of the user's request into the "language" field:
+   - "english": Request is primarily in English vocabulary and structure (e.g. "Make this trip cheaper", "Increase budget to 40000").
+   - "hindi": Request is in Devanagari Hindi script (e.g. "मेरा ट्रिप सस्ता कर दो", "महंगी गतिविधियां हटा दो").
+   - "hinglish": Request is Hindi written in Roman script mixed with English words (e.g. "Trip ka budget thoda kam kar do", "expensive activities hatao", "adventure activities badhao").
+   - Default: "english" if uncertain.
+5. If the request is ambiguous (e.g., "change hotel" without specifying budget or style, or vague modification), set "action": "ambiguous_request", "confirmation_required": true, and provide a clear question in "clarification_message".
 
 Allowed Actions:
 - "change_budget": User explicitly wants to set a specific budget amount (e.g. "Increase budget to 40000", "Make budget 25000", "Budget 30000 kar do"). Set "new_budget" (numeric).
@@ -43,16 +49,17 @@ Allowed Actions:
 - "change_destination": User wants to change destination (e.g. "Change destination to Jaipur", "Go to Goa instead"). Set "new_destination" (string).
 - "add_preference": User wants to add preferences/interests (e.g. "I want more adventure", "Add food experiences", "Beach activities badhao"). Set "add_preferences" (list of strings).
 - "remove_preference": User wants to remove preferences (e.g. "Less sightseeing", "No shopping"). Set "remove_preferences" (list of strings).
-- "remove_activity": User wants to remove specific activities or expensive activities (e.g. "Remove expensive activities", "Remove scuba diving"). Set "remove_activity_names" (list of strings).
+- "remove_activity": User wants to remove specific activities or expensive activities (e.g. "Remove expensive activities", "Remove scuba diving", "महंगी गतिविधियां हटा दो"). Set "remove_activity_names" (list of strings).
 - "change_transport_preference": User wants to change transport (e.g. "Use flight instead", "Prefer train"). Set "requested_transport_preference" (string).
 - "change_accommodation_preference": User wants to change accommodation (e.g. "Stay in luxury hotel", "Prefer hostel"). Set "requested_accommodation_preference" (string).
-- "optimize_budget": User asks to make trip cheaper or budget-friendly without giving an exact number (e.g. "Make this trip cheaper", "Budget thoda kam karo").
+- "optimize_budget": User asks to make trip cheaper or budget-friendly without giving an exact number (e.g. "Make this trip cheaper", "Budget thoda kam karo", "मेरा ट्रिप सस्ता कर दो").
 - "regenerate_itinerary": User asks to reshuffle or regenerate plan without changes.
 - "ambiguous_request": User request is unclear or missing key parameters.
 
 OUTPUT FORMAT (JSON ONLY):
 {
   "action": "<action_string>",
+  "language": "english" | "hindi" | "hinglish",
   "new_destination": null,
   "new_budget": null,
   "new_duration_days": null,
@@ -70,7 +77,7 @@ class LLMProvider(BaseLLMProvider):
     """
     Multi-provider LLM client supporting Groq, NVIDIA NIM/Build, Google Gemini, and OpenRouter.
     Includes active provider selection, optional fallback provider routing, configurable retries,
-    timeout handling, and strict JSON output validation.
+    timeout handling, language detection, and strict JSON output validation.
     """
 
     def __init__(
@@ -107,6 +114,7 @@ class LLMProvider(BaseLLMProvider):
         if not message or not message.strip():
             return ModificationIntent(
                 action="ambiguous_request",
+                language=ResponseLanguage.ENGLISH,
                 confirmation_required=True,
                 clarification_message="Please provide a message specifying what you would like to change.",
             )
@@ -217,6 +225,22 @@ class LLMProvider(BaseLLMProvider):
         except Exception as err:
             raise LLMExecutionError(f"LLM output failed Pydantic validation: {err}") from err
 
+    def _detect_language_rule_based(self, text: str) -> ResponseLanguage:
+        """Helper rule-based language detector for Hindi script, Hinglish words, or English default."""
+        if re.search(r'[\u0900-\u097F]', text):
+            return ResponseLanguage.HINDI
+
+        hinglish_keywords = [
+            r'\bkar\b', r'\bkaro\b', r'\bkar do\b', r'\bdo\b', r'\bhatao\b', r'\bhata\b',
+            r'\bbadhao\b', r'\bchahiye\b', r'\bthoda\b', r'\bsasta\b', r'\bmehenga\b',
+            r'\bdin\b', r'\bki\b', r'\bko\b', r'\bse\b', r'\baur\b', r'\bbhi\b', r'\bdobara\b'
+        ]
+        for pattern in hinglish_keywords:
+            if re.search(pattern, text, re.IGNORECASE):
+                return ResponseLanguage.HINGLISH
+
+        return ResponseLanguage.ENGLISH
+
     def _parse_rule_based(
         self,
         message: str,
@@ -224,76 +248,90 @@ class LLMProvider(BaseLLMProvider):
     ) -> ModificationIntent:
         """Rule-based parser for fallback/testing when API key is missing or testing offline."""
         text = message.lower().strip()
+        detected_lang = self._detect_language_rule_based(message)
 
-        if text in ["change hotel", "change transport", "change accommodation", "badlo"]:
+        if text in ["change hotel", "change transport", "change accommodation", "badlo", "होटल बदलो"]:
+            msg = "Could you please specify details for your request?"
+            if detected_lang == ResponseLanguage.HINDI:
+                msg = f"कृपया '{message}' के लिए अधिक जानकारी प्रदान करें।"
+            elif detected_lang == ResponseLanguage.HINGLISH:
+                msg = f"Please '{message}' ke liye details specify karein."
+
             return ModificationIntent(
                 action="ambiguous_request",
+                language=detected_lang,
                 confirmation_required=True,
-                clarification_message=f"Could you please specify details for '{message}'?",
+                clarification_message=msg,
             )
 
-        budget_match = re.search(r'(?:budget|₹|rs\.?)\s*(?:to|is|be|=|kar do)?\s*₹?\s*([\d,]+)', text)
+        # 1. Cheaper / Optimize budget (check BEFORE destination regex to avoid matching "Trip ka budget...")
+        if any(kw in text for kw in ["cheaper", "sasta", "kam karo", "kam kar", "optimize budget", "less expensive", "सस्ता", "कम कर"]):
+            return ModificationIntent(action="optimize_budget", language=detected_lang)
+
+        # 2. Budget extraction
+        budget_match = re.search(r'(?:budget|₹|rs\.?)\s*(?:to|is|be|=|kar do|कर दो)?\s*₹?\s*([\d,]+)', text)
         if not budget_match:
             budget_match = re.search(r'([\d,]+)\s*(?:budget|rupees|rs|inr)', text)
 
-        if budget_match and ("cheaper" not in text and "kam" not in text or "to" in text or "kar do" in text):
+        if budget_match and ("cheaper" not in text and "kam" not in text and "कम" not in text or "to" in text or "kar do" in text or "कर दो" in text):
             val_str = budget_match.group(1).replace(",", "")
             try:
                 num = float(val_str)
                 if num > 0:
-                    return ModificationIntent(action="change_budget", new_budget=num)
+                    return ModificationIntent(action="change_budget", language=detected_lang, new_budget=num)
             except ValueError:
                 pass
 
-        duration_match = re.search(r'(\d+)\s*(?:day|days|din)', text)
+        # 3. Duration extraction
+        duration_match = re.search(r'(\d+)\s*(?:day|days|din|दिन)', text)
         if duration_match:
             try:
                 days = int(duration_match.group(1))
                 if days > 0:
-                    return ModificationIntent(action="change_duration", new_duration_days=days)
+                    return ModificationIntent(action="change_duration", language=detected_lang, new_duration_days=days)
             except ValueError:
                 pass
 
+        # 4. Remove activity / expensive activities
+        if "remove expensive" in text or "mehenga hata" in text or "महंगी गतिविधियां हटा" in text or "expensive activities hata" in text:
+            return ModificationIntent(action="remove_activity", language=detected_lang, remove_activity_names=["expensive_activities"])
+        elif "remove" in text or "hata" in text or "हटा" in text:
+            rem_match = re.search(r'(?:remove|hata do|hatao|हटा दो)\s+([a-zA-Z\s\u0900-\u097F]+)', text)
+            act_name = rem_match.group(1).strip() if rem_match else "activity"
+            return ModificationIntent(action="remove_activity", language=detected_lang, remove_activity_names=[act_name])
+
+        # 5. Destination change
         dest_match = re.search(r'(?:destination|place|go|trip)\s*(?:to|instead|badal ke)?\s*([a-zA-Z\s]+)', text)
-        if "jaipur" in text:
-            return ModificationIntent(action="change_destination", new_destination="Jaipur")
-        elif "goa" in text:
-            return ModificationIntent(action="change_destination", new_destination="Goa")
-        elif "manali" in text:
-            return ModificationIntent(action="change_destination", new_destination="Manali")
+        if "jaipur" in text or "जयपुर" in text:
+            return ModificationIntent(action="change_destination", language=detected_lang, new_destination="Jaipur")
+        elif "goa" in text or "गोवा" in text:
+            return ModificationIntent(action="change_destination", language=detected_lang, new_destination="Goa")
+        elif "manali" in text or "मनाली" in text:
+            return ModificationIntent(action="change_destination", language=detected_lang, new_destination="Manali")
         elif dest_match and "cheaper" not in text and "adventure" not in text:
             dest_name = dest_match.group(1).strip().title()
-            if dest_name and dest_name not in ["To", "Cheaper", "More"]:
-                return ModificationIntent(action="change_destination", new_destination=dest_name)
+            if dest_name and dest_name not in ["To", "Cheaper", "More", "Ka Budget", "Ka"]:
+                return ModificationIntent(action="change_destination", language=detected_lang, new_destination=dest_name)
 
-        if any(kw in text for kw in ["cheaper", "sasta", "kam karo", "optimize budget", "less expensive"]):
-            return ModificationIntent(action="optimize_budget")
+        # 6. Preferences
+        if "flight" in text or "air" in text or "फ्लाइट" in text:
+            return ModificationIntent(action="change_transport_preference", language=detected_lang, requested_transport_preference="flight")
+        elif "train" in text or "ट्रेन" in text:
+            return ModificationIntent(action="change_transport_preference", language=detected_lang, requested_transport_preference="train")
 
-        if "flight" in text or "air" in text:
-            return ModificationIntent(action="change_transport_preference", requested_transport_preference="flight")
-        elif "train" in text:
-            return ModificationIntent(action="change_transport_preference", requested_transport_preference="train")
-
-        if "luxury" in text or "5 star" in text or "resort" in text:
-            return ModificationIntent(action="change_accommodation_preference", requested_accommodation_preference="luxury")
-        elif "hostel" in text or "budget hotel" in text:
-            return ModificationIntent(action="change_accommodation_preference", requested_accommodation_preference="budget")
-
-        if "remove expensive" in text or "mehenga hata do" in text:
-            return ModificationIntent(action="remove_activity", remove_activity_names=["expensive_activities"])
-        elif "remove" in text or "hata do" in text:
-            rem_match = re.search(r'(?:remove|hata do)\s+([a-zA-Z\s]+)', text)
-            act_name = rem_match.group(1).strip() if rem_match else "activity"
-            return ModificationIntent(action="remove_activity", remove_activity_names=[act_name])
+        if "luxury" in text or "5 star" in text or "resort" in text or "लक्जरी" in text:
+            return ModificationIntent(action="change_accommodation_preference", language=detected_lang, requested_accommodation_preference="luxury")
+        elif "hostel" in text or "budget hotel" in text or "हॉस्टल" in text:
+            return ModificationIntent(action="change_accommodation_preference", language=detected_lang, requested_accommodation_preference="budget")
 
         adds, removes = [], []
-        if "adventure" in text:
+        if "adventure" in text or "एडवेंचर" in text:
             adds.append("adventure")
-        if "food" in text:
+        if "food" in text or "खाना" in text:
             adds.append("food")
-        if "beach" in text:
+        if "beach" in text or "बीच" in text:
             adds.append("beach")
-        if "culture" in text:
+        if "culture" in text or "संस्कृति" in text:
             adds.append("culture")
         if "sightseeing" in text:
             if "less sightseeing" in text or "no sightseeing" in text:
@@ -304,12 +342,20 @@ class LLMProvider(BaseLLMProvider):
         if adds or removes:
             return ModificationIntent(
                 action="add_preference" if adds else "remove_preference",
+                language=detected_lang,
                 add_preferences=adds,
                 remove_preferences=removes,
             )
 
+        msg = f"I wasn't sure how to modify your trip based on: '{message}'. Could you please rephrase?"
+        if detected_lang == ResponseLanguage.HINDI:
+            msg = f"मुझे आपके अनुरोध '{message}' को समझने में समस्या हुई। कृपया दोबारा स्पष्ट करें।"
+        elif detected_lang == ResponseLanguage.HINGLISH:
+            msg = f"Aapka request '{message}' clear nahi tha. Please dobara clarify karein."
+
         return ModificationIntent(
             action="ambiguous_request",
+            language=detected_lang,
             confirmation_required=True,
-            clarification_message=f"I wasn't sure how to modify your trip based on: '{message}'. Could you please rephrase?",
+            clarification_message=msg,
         )

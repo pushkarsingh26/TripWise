@@ -155,7 +155,23 @@ Tripwise supports multiple free-tier LLM providers for conversational trip modif
 
 ---
 
+## Multilingual System (Phase 8)
+
+Tripwise natively supports natural language understanding and localized responses across three languages:
+
+- **English**: Standard English vocabulary and structure (*"Make my trip cheaper"*, *"Remove expensive activities"*).
+- **Hindi**: Devanagari script Hindi (*"मेरा ट्रिप सस्ता कर दो"*, *"महंगी गतिविधियां हटा दो"*).
+- **Hinglish**: Roman-script Hindi mixed with English (*"Trip ka budget thoda kam kar do"*, *"Expensive activities hatao"*).
+
+### Features
+- **Automatic Style & Language Detection**: Detects language dynamically using provider-independent JSON schemas with strict Pydantic validation (`ResponseLanguage`).
+- **Language Preservation**: Detected language travels through intent extraction, deterministic trip modification, and response generation so confirmations/clarifications are delivered in the same language style.
+- **Deterministic Fallback**: Defaults to `english` if detection is missing, ambiguous, or unsupported.
+
+---
+
 ## License
 
 [MIT License](LICENSE)
+
 

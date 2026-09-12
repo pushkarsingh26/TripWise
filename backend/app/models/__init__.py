@@ -9,6 +9,7 @@ from app.models.itinerary import (
     ItineraryDay,
     ItineraryResult,
 )
+from app.models.language import ResponseLanguage
 from app.models.modification import ModificationAction, ModificationIntent
 from app.models.transport import TransportOption, TransportResults
 from app.models.trip import TripPlanningState, TripRequest
@@ -30,4 +31,5 @@ __all__ = [
     "ItineraryResult",
     "ModificationAction",
     "ModificationIntent",
+    "ResponseLanguage",
 ]
