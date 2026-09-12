@@ -1,165 +1,25 @@
 "use client";
 
-import { useEffect, useState } from "react";
-
-interface TripData {
-  origin: string;
-  destination: string;
-  start_date: string;
-  end_date: string;
-  budget: number;
-  travelers: number;
-  preferences: string[];
-}
-
-interface TransportOptionData {
-  mode: string;
-  estimated_cost_min: number;
-  estimated_cost_max: number;
-  currency: string;
-  pricing_type: string;
-  duration: string;
-  comfort_level: string;
-  recommendation_type: string;
-  pros: string[];
-  cons: string[];
-  is_estimate: boolean;
-}
-
-interface AccommodationOptionData {
-  name: string;
-  category: string;
-  estimated_price_per_night_min: number;
-  estimated_price_per_night_max: number;
-  estimated_total_min: number;
-  estimated_total_max: number;
-  currency: string;
-  location_description: string;
-  rating?: number;
-  amenities: string[];
-  is_estimate: boolean;
-}
-
-interface DestinationPlaceData {
-  name: string;
-  category: string;
-  description: string;
-  estimated_cost_min: number;
-  estimated_cost_max: number;
-  currency: string;
-  recommended_duration: string;
-  best_for: string[];
-  is_estimate: boolean;
-}
-
-interface BudgetBreakdownData {
-  transport_min: number;
-  transport_max: number;
-  accommodation_min: number;
-  accommodation_max: number;
-  activities_min: number;
-  activities_max: number;
-  food_min: number;
-  food_max: number;
-  local_travel_min: number;
-  local_travel_max: number;
-  miscellaneous_min: number;
-  miscellaneous_max: number;
-  total_min: number;
-  total_max: number;
-  currency: string;
-  is_estimate: boolean;
-}
-
-interface BudgetResultData {
-  budget: number;
-  breakdown: BudgetBreakdownData;
-  budget_status: "within_budget" | "near_budget" | "over_budget";
-  remaining_min: number;
-  remaining_max: number;
-  recommendations: string[];
-  is_estimate: boolean;
-}
-
-interface ItineraryActivityData {
-  name: string;
-  category: string;
-  description: string;
-  start_time: string;
-  end_time: string;
-  duration: string;
-  estimated_cost_min: number;
-  estimated_cost_max: number;
-  is_estimate: boolean;
-}
-
-interface ItineraryDayData {
-  day_number: number;
-  date: string;
-  title: string;
-  activities: ItineraryActivityData[];
-  estimated_day_cost_min: number;
-  estimated_day_cost_max: number;
-}
-
-interface ItineraryResultData {
-  destination: string;
-  start_date: string;
-  end_date: string;
-  duration_days: number;
-  days: ItineraryDayData[];
-  total_activity_cost_min: number;
-  total_activity_cost_max: number;
-  is_estimate: boolean;
-}
-
-interface FullPlanResponse {
-  status: "success" | "needs_information" | "needs_clarification" | "error";
-  trip?: TripData;
-  duration_days?: number;
-  duration_nights?: number;
-  transport?: {
-    origin: string;
-    destination: string;
-    options: TransportOptionData[];
-  };
-  accommodation?: {
-    destination: string;
-    nights: number;
-    options: AccommodationOptionData[];
-  };
-  destination?: {
-    destination: string;
-    supported: boolean;
-    message?: string;
-    recommendations: DestinationPlaceData[];
-  };
-  budget?: BudgetResultData;
-  itinerary?: ItineraryResultData;
-  missing?: string[];
-  error?: string;
-  intent?: Record<string, any>;
-  message?: string;
-}
+import { useEffect, useState, useRef } from "react";
+import { Header } from "../components/Header";
+import { Composer } from "../components/Composer";
+import { SuggestionPrompts } from "../components/SuggestionPrompts";
+import { MessageBubble } from "../components/MessageBubble";
+import { LoadingState } from "../components/LoadingState";
+import { ChatMessage, FullPlanResponse, TripRequest } from "../types/trip";
 
 export default function Home() {
   const [backendStatus, setBackendStatus] = useState<string>("Checking...");
-  const [message, setMessage] = useState<string>(
-    "I want to travel from Indore to Goa from October 10 to October 15 with a budget of 30000 for 2 people. I love beaches and food."
-  );
-  const [modificationMsg, setModificationMsg] = useState<string>("");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [inputMessage, setInputMessage] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
-  const [modifying, setModifying] = useState<boolean>(false);
-  const [planResult, setPlanResult] = useState<FullPlanResponse | null>(null);
-  const [modificationFeedback, setModificationFeedback] = useState<{
-    type: "success" | "warning" | "error";
-    message: string;
-    intent?: Record<string, any>;
-  } | null>(null);
-  const [apiError, setApiError] = useState<string | null>(null);
+  const [loadingMsg, setLoadingMsg] = useState<string>("Tripwise is planning your trip...");
+  const [currentTripRequest, setCurrentTripRequest] = useState<TripRequest | null>(null);
 
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+  // Check health status on load
   useEffect(() => {
     fetch(`${apiUrl}/health`)
       .then((res) => res.json())
@@ -175,454 +35,238 @@ export default function Home() {
       });
   }, [apiUrl]);
 
-  const handleGeneratePlan = async (e: React.FormEvent) => {
+  // Auto scroll to bottom of chat
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  const handleResetTrip = () => {
+    setMessages([]);
+    setCurrentTripRequest(null);
+    setInputMessage("");
+    setLoading(false);
+  };
+
+  const handleSelectPrompt = (promptText: string) => {
+    setInputMessage(promptText);
+    executeSendMessage(promptText);
+  };
+
+  const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!inputMessage.trim() || loading) return;
+    const textToSend = inputMessage.trim();
+    setInputMessage("");
+    executeSendMessage(textToSend);
+  };
+
+  const executeSendMessage = async (userPrompt: string) => {
+    const userMsgId = `user-${Date.now()}`;
+    const timestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+    const userMessage: ChatMessage = {
+      id: userMsgId,
+      sender: "user",
+      content: userPrompt,
+      timestamp,
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
     setLoading(true);
-    setPlanResult(null);
-    setApiError(null);
-    setModificationFeedback(null);
 
     try {
-      const res = await fetch(`${apiUrl}/api/trips/plan`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
-      });
+      if (!currentTripRequest) {
+        // --- INITIAL TRIP PLANNING FLOW ---
+        // Step A: Parse natural-language input into structured request
+        setLoadingMsg("Parsing trip parameters...");
+        const parseRes = await fetch(`${apiUrl}/api/trips/parse`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: userPrompt }),
+        });
 
-      const data = await res.json();
-      if (!res.ok) {
-        setApiError(data.detail || "Failed to generate trip plan.");
+        const parseData = await parseRes.json();
+
+        if (!parseRes.ok) {
+          const assistantMsg: ChatMessage = {
+            id: `assistant-${Date.now()}`,
+            sender: "assistant",
+            content: parseData.detail || "Unable to understand trip parameters. Please clarify your request.",
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            isError: true,
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+          return;
+        }
+
+        if (parseData.status === "needs_information") {
+          const assistantMsg: ChatMessage = {
+            id: `assistant-${Date.now()}`,
+            sender: "assistant",
+            content: "I need a little more information before I can plan this trip.",
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            missing: parseData.missing,
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+          return;
+        }
+
+        // Step B: Send structured trip request to /plan endpoint
+        const structuredTrip: TripRequest = parseData.trip;
+        setLoadingMsg("Generating full trip plan & itinerary...");
+
+        const planRes = await fetch(`${apiUrl}/api/trips/plan`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ trip: structuredTrip }),
+        });
+
+        const planData: FullPlanResponse = await planRes.json();
+
+        if (!planRes.ok || planData.status === "error") {
+          const assistantMsg: ChatMessage = {
+            id: `assistant-${Date.now()}`,
+            sender: "assistant",
+            content: planData.error || "Tripwise encountered an issue while generating your trip plan. Please try again.",
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            isError: true,
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+          return;
+        }
+
+        if (planData.status === "success" && planData.trip) {
+          setCurrentTripRequest(planData.trip);
+
+          const assistantMsg: ChatMessage = {
+            id: `assistant-${Date.now()}`,
+            sender: "assistant",
+            content: `Here is your trip plan for ${planData.trip.destination}! I have optimized transport, accommodation, budget breakdown, and day-by-day itinerary below.`,
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            plan: planData,
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+        }
       } else {
-        setPlanResult(data);
+        // --- CONVERSATIONAL MODIFICATION FLOW ---
+        setLoadingMsg("Updating your trip plan...");
+
+        const modifyRes = await fetch(`${apiUrl}/api/trips/modify`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: userPrompt,
+            trip: currentTripRequest,
+          }),
+        });
+
+        const modifyData = await modifyRes.json();
+
+        if (!modifyRes.ok) {
+          const assistantMsg: ChatMessage = {
+            id: `assistant-${Date.now()}`,
+            sender: "assistant",
+            content: modifyData.detail || "Tripwise couldn't update your trip right now. Please try again.",
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            isError: true,
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+          return;
+        }
+
+        if (modifyData.status === "needs_clarification") {
+          const assistantMsg: ChatMessage = {
+            id: `assistant-${Date.now()}`,
+            sender: "assistant",
+            content: modifyData.message || "Request is ambiguous. Please clarify your modification.",
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            modificationResult: {
+              status: "needs_clarification",
+              message: modifyData.message,
+              intent: modifyData.intent,
+            },
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+          return;
+        }
+
+        if (modifyData.status === "success" && modifyData.plan && modifyData.trip) {
+          setCurrentTripRequest(modifyData.trip);
+
+          const updatedPlanResponse: FullPlanResponse = {
+            status: "success",
+            trip: modifyData.trip,
+            duration_days: modifyData.plan.duration_days,
+            duration_nights: modifyData.plan.duration_nights,
+            transport: modifyData.plan.transport,
+            accommodation: modifyData.plan.accommodation,
+            destination: modifyData.plan.destination,
+            budget: modifyData.plan.budget,
+            itinerary: modifyData.plan.itinerary,
+          };
+
+          const assistantMsg: ChatMessage = {
+            id: `assistant-${Date.now()}`,
+            sender: "assistant",
+            content: modifyData.message || "Updated your trip plan according to your preferences!",
+            timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            plan: updatedPlanResponse,
+            modificationResult: {
+              status: "success",
+              message: modifyData.message,
+              intent: modifyData.intent,
+            },
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+        }
       }
     } catch {
-      setApiError("Unable to connect to backend service.");
+      const assistantMsg: ChatMessage = {
+        id: `assistant-${Date.now()}`,
+        sender: "assistant",
+        content: "Unable to connect to Tripwise services. Please ensure the backend server is running and try again.",
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        isError: true,
+      };
+      setMessages((prev) => [...prev, assistantMsg]);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleModifyTrip = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!planResult || !planResult.trip || !modificationMsg.trim()) return;
-
-    setModifying(true);
-    setModificationFeedback(null);
-
-    try {
-      const res = await fetch(`${apiUrl}/api/trips/modify`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: modificationMsg,
-          trip: planResult.trip,
-        }),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        setModificationFeedback({
-          type: "error",
-          message: data.detail || "Failed to modify trip plan.",
-        });
-      } else if (data.status === "needs_clarification") {
-        setModificationFeedback({
-          type: "warning",
-          message: data.message || "Request is ambiguous. Please clarify your modification.",
-          intent: data.intent,
-        });
-      } else if (data.status === "success") {
-        setModificationFeedback({
-          type: "success",
-          message: data.message || "Trip plan updated successfully!",
-          intent: data.intent,
-        });
-        if (data.plan && data.trip) {
-          setPlanResult({
-            status: "success",
-            trip: data.trip,
-            duration_days: data.plan.duration_days,
-            duration_nights: data.plan.duration_nights,
-            transport: data.plan.transport,
-            accommodation: data.plan.accommodation,
-            destination: data.plan.destination,
-            budget: data.plan.budget,
-            itinerary: data.plan.itinerary,
-          });
-        }
-        setModificationMsg("");
-      }
-    } catch {
-      setModificationFeedback({
-        type: "error",
-        message: "Unable to communicate with modification service.",
-      });
-    } finally {
-      setModifying(false);
-    }
-  };
-
-  const getStatusBadge = (status: string) => {
-    switch (status) {
-      case "within_budget":
-        return (
-          <span className="px-2.5 py-1 bg-green-100 text-green-800 text-xs font-semibold rounded">
-            Within Budget
-          </span>
-        );
-      case "near_budget":
-        return (
-          <span className="px-2.5 py-1 bg-amber-100 text-amber-800 text-xs font-semibold rounded">
-            Near Budget
-          </span>
-        );
-      case "over_budget":
-        return (
-          <span className="px-2.5 py-1 bg-red-100 text-red-800 text-xs font-semibold rounded">
-            Over Budget
-          </span>
-        );
-      default:
-        return null;
-    }
-  };
-
-  const getModeIcon = (mode: string) => {
-    switch (mode) {
-      case "flight":
-        return "✈️ Flight";
-      case "train":
-        return "🚆 Train";
-      case "bus":
-        return "🚌 Bus";
-      default:
-        return mode;
-    }
-  };
-
   return (
-    <main className="min-h-screen p-8 flex flex-col justify-between font-sans bg-white text-black max-w-4xl mx-auto">
-      <div className="space-y-6">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Tripwise</h1>
-          <p className="text-gray-700 text-lg">AI-powered travel planning</p>
-          <p className="text-sm text-gray-500">
-            Phase 7 — Conversational Trip Modification + LLM Integration
-          </p>
-        </div>
+    <div className="flex flex-col min-h-screen bg-slate-50 dark:bg-neutral-950">
+      <Header
+        backendStatus={backendStatus}
+        onNewTrip={handleResetTrip}
+        hasActiveTrip={messages.length > 0}
+      />
 
-        <form onSubmit={handleGeneratePlan} className="space-y-4">
-          <label className="block text-sm font-medium text-gray-700">
-            Tell Tripwise about your trip
-          </label>
-          <textarea
-            rows={3}
-            className="w-full p-3 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-black text-black bg-white"
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            placeholder="e.g. I want to travel from Indore to Goa from Oct 10 to Oct 15 with a budget of 30000 for 2 people. I love beaches and food."
-            required
-          />
-          <button
-            type="submit"
-            disabled={loading}
-            className="px-5 py-2.5 bg-black text-white rounded font-medium disabled:opacity-50"
-          >
-            {loading ? "Orchestrating Plan..." : "Generate Full Trip Plan"}
-          </button>
-        </form>
+      <main className="flex-1 max-w-4xl w-full mx-auto px-4 sm:px-6 py-6 flex flex-col">
+        {messages.length === 0 ? (
+          <div className="flex-1 flex items-center justify-center">
+            <SuggestionPrompts onSelectPrompt={handleSelectPrompt} />
+          </div>
+        ) : (
+          <div className="flex-1 space-y-4 pb-4">
+            {messages.map((msg) => (
+              <MessageBubble key={msg.id} message={msg} />
+            ))}
 
-        {apiError && (
-          <div className="p-4 border border-red-300 bg-red-50 text-red-700 text-sm rounded">
-            {apiError}
+            {loading && <LoadingState message={loadingMsg} />}
+
+            <div ref={messagesEndRef} />
           </div>
         )}
+      </main>
 
-        {planResult && planResult.status === "needs_information" && (
-          <div className="p-4 border border-amber-300 bg-amber-50 text-amber-800 text-sm rounded space-y-2">
-            <p className="font-semibold">Missing Information Required</p>
-            <p>Please specify the following missing parameters:</p>
-            <ul className="list-disc list-inside font-mono text-xs">
-              {planResult.missing?.map((field) => (
-                <li key={field}>{field}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {planResult && planResult.status === "success" && planResult.trip && (
-          <div className="space-y-6">
-            {/* Trip Summary */}
-            <div className="p-4 border border-gray-200 rounded space-y-3">
-              <h2 className="font-semibold text-lg border-b border-gray-200 pb-2">
-                Trip Information
-              </h2>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-sm">
-                <div>
-                  <span className="text-gray-500 block text-xs">Origin</span>
-                  <span className="font-medium">{planResult.trip.origin}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500 block text-xs">Destination</span>
-                  <span className="font-medium">{planResult.trip.destination}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500 block text-xs">Dates</span>
-                  <span className="font-medium">
-                    {planResult.trip.start_date} → {planResult.trip.end_date}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-500 block text-xs">Target Budget</span>
-                  <span className="font-medium">
-                    ₹{planResult.trip.budget.toLocaleString()}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-500 block text-xs">Travelers</span>
-                  <span className="font-medium">{planResult.trip.travelers}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500 block text-xs">Duration</span>
-                  <span className="font-medium">
-                    {planResult.duration_days} days / {planResult.duration_nights} nights
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Conversational Trip Modification Form */}
-            <div className="p-4 border border-blue-200 bg-blue-50/40 rounded space-y-3">
-              <h3 className="font-semibold text-base text-blue-900">
-                Modify Current Trip Plan
-              </h3>
-              <form onSubmit={handleModifyTrip} className="space-y-3">
-                <input
-                  type="text"
-                  className="w-full p-2.5 border border-gray-300 rounded text-sm text-black bg-white focus:outline-none focus:ring-1 focus:ring-black"
-                  placeholder="e.g. 'Make this trip cheaper', 'Increase budget to ₹40,000', 'Make it 4 days', 'Add more adventure'"
-                  value={modificationMsg}
-                  onChange={(e) => setModificationMsg(e.target.value)}
-                  disabled={modifying}
-                />
-                <button
-                  type="submit"
-                  disabled={modifying || !modificationMsg.trim()}
-                  className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {modifying ? "Interpreting & Updating..." : "Update Trip"}
-                </button>
-              </form>
-
-              {modificationFeedback && (
-                <div
-                  className={`p-3 text-xs rounded border ${
-                    modificationFeedback.type === "error"
-                      ? "bg-red-50 border-red-200 text-red-800"
-                      : modificationFeedback.type === "warning"
-                      ? "bg-amber-50 border-amber-200 text-amber-800"
-                      : "bg-green-50 border-green-200 text-green-800"
-                  }`}
-                >
-                  <p className="font-semibold">{modificationFeedback.message}</p>
-                  {modificationFeedback.intent && (
-                    <div className="mt-1 font-mono text-[11px] bg-white/70 p-1.5 rounded">
-                      Action: {modificationFeedback.intent.action}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Day-by-Day Itinerary */}
-            {planResult.itinerary && (
-              <div className="p-4 border border-gray-200 rounded space-y-4">
-                <div className="flex justify-between items-center border-b border-gray-200 pb-2">
-                  <h2 className="font-semibold text-lg">Day-by-Day Itinerary</h2>
-                  {planResult.itinerary.is_estimate && (
-                    <span className="text-xs px-2 py-0.5 bg-amber-100 text-amber-800 rounded font-normal">
-                      Illustrative Estimate
-                    </span>
-                  )}
-                </div>
-
-                <div className="space-y-4">
-                  {planResult.itinerary.days.map((day) => (
-                    <div
-                      key={day.day_number}
-                      className="border border-gray-200 rounded p-4 space-y-3 bg-gray-50/50"
-                    >
-                      <div className="flex justify-between items-center font-medium border-b border-gray-200 pb-1 text-sm">
-                        <span>
-                          {day.title} ({day.date})
-                        </span>
-                        <span className="text-xs text-gray-500">
-                          Est. Day Activity Cost: ₹
-                          {day.estimated_day_cost_min.toLocaleString()} – ₹
-                          {day.estimated_day_cost_max.toLocaleString()}
-                        </span>
-                      </div>
-
-                      {day.activities.length === 0 ? (
-                        <p className="text-xs text-gray-500 italic">
-                          Free time / Exploration day
-                        </p>
-                      ) : (
-                        <div className="space-y-2">
-                          {day.activities.map((act, idx) => (
-                            <div
-                              key={idx}
-                              className="p-3 bg-white border border-gray-200 rounded text-sm space-y-1"
-                            >
-                              <div className="flex justify-between items-center font-medium">
-                                <span className="flex gap-2 items-center">
-                                  <span className="text-xs px-2 py-0.5 bg-black text-white rounded font-mono">
-                                    {act.start_time} – {act.end_time}
-                                  </span>
-                                  <span>{act.name}</span>
-                                </span>
-                                <span className="text-xs px-2 py-0.5 bg-gray-200 rounded text-gray-700 capitalize">
-                                  {act.category}
-                                </span>
-                              </div>
-                              <p className="text-gray-600 text-xs">{act.description}</p>
-                              <div className="text-gray-500 text-xs flex justify-between pt-1">
-                                <span>Duration: {act.duration}</span>
-                                <span>
-                                  Est. Cost: ₹{act.estimated_cost_min.toLocaleString()} – ₹
-                                  {act.estimated_cost_max.toLocaleString()}
-                                </span>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Budget Engine Breakdown & Optimization */}
-            {planResult.budget && (
-              <div className="p-4 border border-gray-200 rounded space-y-4">
-                <div className="flex justify-between items-center border-b border-gray-200 pb-2">
-                  <div className="flex items-center gap-3">
-                    <h2 className="font-semibold text-lg">Budget Breakdown</h2>
-                    {getStatusBadge(planResult.budget.budget_status)}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm bg-gray-50 p-3 rounded">
-                  <div>
-                    <span className="text-gray-500 block text-xs">Estimated Total Range</span>
-                    <span className="font-semibold text-base">
-                      ₹{planResult.budget.breakdown.total_min.toLocaleString()} – ₹
-                      {planResult.budget.breakdown.total_max.toLocaleString()}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500 block text-xs">
-                      Estimated Budget Balance (Remaining Delta)
-                    </span>
-                    <span className="font-semibold text-base">
-                      {planResult.budget.remaining_min >= 0 ? "+" : ""}
-                      ₹{planResult.budget.remaining_min.toLocaleString()} to{" "}
-                      {planResult.budget.remaining_max >= 0 ? "+" : ""}
-                      ₹{planResult.budget.remaining_max.toLocaleString()}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Recommendations */}
-                {planResult.budget.recommendations.length > 0 && (
-                  <div className="p-3 bg-blue-50 border border-blue-200 text-blue-900 rounded space-y-1">
-                    <p className="font-semibold text-xs uppercase tracking-wide">
-                      Budget Optimization Suggestions
-                    </p>
-                    <ul className="list-disc list-inside text-xs space-y-1">
-                      {planResult.budget.recommendations.map((tip, idx) => (
-                        <li key={idx}>{tip}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Transport Options */}
-            {planResult.transport && (
-              <div className="p-4 border border-gray-200 rounded space-y-4">
-                <h2 className="font-semibold text-lg border-b border-gray-200 pb-2">
-                  Transport Options
-                </h2>
-                <div className="space-y-3">
-                  {planResult.transport.options.map((opt) => (
-                    <div
-                      key={opt.mode}
-                      className="p-3 border border-gray-100 bg-gray-50 rounded text-sm space-y-1"
-                    >
-                      <div className="flex justify-between items-center font-medium">
-                        <span>{getModeIcon(opt.mode)}</span>
-                        <div className="flex gap-2 items-center">
-                          <span className="text-xs px-2 py-0.5 bg-gray-200 rounded text-gray-700 capitalize">
-                            Best for: {opt.recommendation_type}
-                          </span>
-                          {opt.is_estimate && (
-                            <span className="text-xs px-2 py-0.5 bg-amber-100 text-amber-800 rounded font-normal">
-                              Estimate
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="text-gray-600">
-                        Estimated Cost: ₹{opt.estimated_cost_min.toLocaleString()} – ₹
-                        {opt.estimated_cost_max.toLocaleString()} ({opt.pricing_type})
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Accommodation Options */}
-            {planResult.accommodation && (
-              <div className="p-4 border border-gray-200 rounded space-y-4">
-                <h2 className="font-semibold text-lg border-b border-gray-200 pb-2">
-                  Accommodation Options ({planResult.accommodation.nights} nights)
-                </h2>
-                <div className="space-y-3">
-                  {planResult.accommodation.options.map((acc) => (
-                    <div
-                      key={acc.category}
-                      className="p-3 border border-gray-100 bg-gray-50 rounded text-sm space-y-1"
-                    >
-                      <div className="flex justify-between items-center font-medium">
-                        <span>{acc.name}</span>
-                        {acc.is_estimate && (
-                          <span className="text-xs px-2 py-0.5 bg-amber-100 text-amber-800 rounded font-normal">
-                            Estimate
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-gray-800 font-medium">
-                        Total Stay ({planResult.accommodation?.nights} nights): ₹
-                        {acc.estimated_total_min.toLocaleString()} – ₹
-                        {acc.estimated_total_max.toLocaleString()}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className="border-t border-gray-200 pt-4 mt-8 text-sm text-gray-600">
-        Backend Status: <span className="font-semibold">{backendStatus}</span>
-      </div>
-    </main>
+      <Composer
+        inputMessage={inputMessage}
+        setInputMessage={setInputMessage}
+        onSubmit={handleFormSubmit}
+        isLoading={loading}
+        hasActiveTrip={currentTripRequest !== null}
+      />
+    </div>
   );
 }
