@@ -2,6 +2,7 @@ from app.models.accommodation import (
     AccommodationOption,
     AccommodationResults,
 )
+from app.models.destination import DestinationPlace, DestinationResults
 from app.models.transport import TransportOption, TransportResults
 from app.models.trip import TripPlanningState, TripRequest
 
@@ -12,4 +13,6 @@ __all__ = [
     "TransportResults",
     "AccommodationOption",
     "AccommodationResults",
+    "DestinationPlace",
+    "DestinationResults",
 ]

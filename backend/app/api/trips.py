@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.agents.accommodation_agent import AccommodationAgent
+from app.agents.destination_agent import DestinationAgent
 from app.agents.planner_agent import PlannerAgent
 from app.agents.transport_agent import TransportAgent
 from app.models.trip import TripRequest
@@ -11,6 +12,7 @@ router = APIRouter(prefix="/api/trips", tags=["trips"])
 planner_agent = PlannerAgent()
 transport_agent = TransportAgent()
 accommodation_agent = AccommodationAgent()
+destination_agent = DestinationAgent()
 
 
 class ParseTripRequest(BaseModel):
@@ -50,7 +52,6 @@ def get_trip_options(payload: ParseTripRequest):
             detail="Either 'message' or 'trip' must be provided in request body.",
         )
 
-    # 1. Run PlannerAgent
     planner_result = planner_agent.process_request(input_data)
 
     if planner_result.get("status") == "error":
@@ -59,13 +60,11 @@ def get_trip_options(payload: ParseTripRequest):
     if planner_result.get("status") == "needs_information":
         return planner_result
 
-    # 2. Extract validated TripRequest
     raw_trip = planner_result["trip"]
     trip_req = TripRequest(**raw_trip)
     duration_days = planner_result["duration_days"]
     duration_nights = planner_result["duration_nights"]
 
-    # 3. Run TransportAgent & AccommodationAgent
     transport_results = transport_agent.get_transport_options(trip_req)
     accommodation_results = accommodation_agent.get_accommodation_options(
         trip_req, duration_nights
@@ -78,4 +77,38 @@ def get_trip_options(payload: ParseTripRequest):
         "duration_nights": duration_nights,
         "transport": transport_results.model_dump(mode="json", by_alias=True),
         "accommodation": accommodation_results.model_dump(mode="json"),
+    }
+
+
+@router.post("/destinations")
+def get_destination_recommendations(payload: ParseTripRequest):
+    if payload.message is not None:
+        input_data = payload.message
+    elif payload.trip is not None:
+        input_data = payload.trip
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Either 'message' or 'trip' must be provided in request body.",
+        )
+
+    planner_result = planner_agent.process_request(input_data)
+
+    if planner_result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=planner_result.get("error"))
+
+    if planner_result.get("status") == "needs_information":
+        return planner_result
+
+    raw_trip = planner_result["trip"]
+    trip_req = TripRequest(**raw_trip)
+
+    destination_results = destination_agent.get_destination_recommendations(
+        trip_req
+    )
+
+    return {
+        "status": "success",
+        "trip": trip_req.model_dump(mode="json"),
+        "destination": destination_results.model_dump(mode="json"),
     }
